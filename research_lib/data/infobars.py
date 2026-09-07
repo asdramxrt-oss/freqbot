@@ -137,4 +137,7 @@ def _sample_by_threshold(
             vol_sum = 0.0
             o = h = l = c = np.nan
     # A trailing incomplete bar is NOT emitted (it has not closed causally yet).
-    return DataFrame(rows)
+    out = DataFrame(rows)
+    if len(out) > 0 and hasattr(stream["date"].iloc[0], "tz"):
+        out["date"] = pd.to_datetime(out["date"], utc=True)
+    return out
