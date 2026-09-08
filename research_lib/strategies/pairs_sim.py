@@ -57,7 +57,7 @@ class PairsSimulator:
         if len(target) != n:
             raise ValueError("target length mismatch")
 
-        notional = self.p.equity * self.p.capital_fraction
+        notional_cfg = self.p.capital_fraction
         cost = self.p.cost
         pos = 0
         trades: list[dict] = []
@@ -69,6 +69,7 @@ class PairsSimulator:
         entry_price_b = 0.0
         qa = 0.0
         qb = 0.0
+        entry_notional = 0.0
 
         for t in range(1, n):
             desired = int(target[t]) if t > 0 else 0
@@ -80,7 +81,9 @@ class PairsSimulator:
                 else:
                     pa = _fill_price(open_a[t], -1, cost)  # sell A
                     pb = _fill_price(open_b[t], 1, cost)   # buy B
-                # dollar-neutral: per-leg notional is exact at the FILL price
+                # risk-engine discipline: size per-leg notional on CURRENT equity at entry
+                # so drawdown automatically de-risks the book
+                notional = equity * notional_cfg
                 qa = notional / pa
                 qb = notional / pb
                 # costs on both legs at entry
@@ -91,6 +94,7 @@ class PairsSimulator:
                 entry_date = dates[t]
                 entry_price_a = float(pa)
                 entry_price_b = float(pb)
+                entry_notional = notional
                 trades.append(None)  # placeholder; finalized on exit
             elif pos != 0 and desired == 0:
                 # exit both legs at this open (qty locked since entry)
@@ -119,7 +123,8 @@ class PairsSimulator:
                     "exit_a": float(xa),
                     "entry_b": entry_price_b,
                     "exit_b": float(xb),
-                    "notional_per_leg": notional,
+                    "notional_per_leg": entry_notional,
+                    "notional": entry_notional * 2,
                     "pnl_net": float(pnl),
                     "fees_paid": float(fees),
                     "exit_reason": "signal",
@@ -159,7 +164,8 @@ class PairsSimulator:
                 "exit_a": float(xa),
                 "entry_b": entry_price_b,
                 "exit_b": float(xb),
-                "notional_per_leg": notional,
+                "notional_per_leg": entry_notional,
+                "notional": entry_notional * 2,
                 "pnl_net": float(pnl),
                 "fees_paid": float(fees),
                 "exit_reason": "force_close",

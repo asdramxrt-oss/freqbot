@@ -134,8 +134,36 @@ class ProbabilityCalibrator:
 
 
 # ---------------------------------------------------------------------------
-# bet sizing (Phase 13)
+# Fractional Kelly sizing (blueprint Phase 3.2)
 # ---------------------------------------------------------------------------
+def kelly_fraction(p_win: float, win_loss_ratio: float) -> float:
+    """Full Kelly fraction: f* = p - (1-p)/b where b = win/loss ratio (gross).
+
+    Only meaningful when p_win and the payoff ratio are estimated OUT-OF-SAMPLE from
+    calibrated probabilities and realized trade outcomes. Returns <= 0 (no bet) when the
+    edge is not positive.
+    """
+    if not (0 < p_win < 1) or win_loss_ratio <= 0:
+        return 0.0
+    f = p_win - (1.0 - p_win) / win_loss_ratio
+    return max(f, 0.0)
+
+
+def fractional_kelly_size(
+    p_win: float,
+    win_loss_ratio: float,
+    kelly_frac: float = 0.25,
+    max_position_frac: float = 1.0,
+) -> float:
+    """Fraction of the risk budget to deploy under fractional Kelly.
+
+    f_kelly = kelly_frac * f*  (quarter-Kelly default for variance control).
+    Returns the fraction in [0, max_position_frac]; 0 means no trade.
+    """
+    f_star = kelly_fraction(p_win, win_loss_ratio)
+    return min(kelly_frac * f_star, max_position_frac)
+
+
 @dataclass
 class BetSizerParams:
     min_confidence: float = 0.52     # below this, no trade
