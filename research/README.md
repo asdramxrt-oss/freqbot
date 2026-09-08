@@ -7,12 +7,15 @@ Evidence-backed trading-system research built on this Freqtrade checkout.
 out-of-sample edge on the available data:
 - Turtle 20-bar: 9/17 gates (positive in-sample economics, fails OOS - regime dependent).
 - Pairs/spread pivot (blueprint): 8/17 gates (all economic gates fail; negative gross).
+- Vol-spike directional alpha (DeepSeek brief): 8/17 gates (four structurally distinct
+  families tested; no directional signal - vol prediction is magnitude-only).
 - The one validated OOS capability is **volatility-spike prediction** (AUC ~0.82-0.90),
   useful as a risk/filter input, not an alpha source.
-See `reports/PRODUCTION_READINESS.md`, `BLUEPRINT_REPORT.md`, `IMPLEMENTATION_REPORT.md`.
+See `reports/PRODUCTION_READINESS.md`, `BLUEPRINT_REPORT.md`, `ALPHA_DISCOVERY_REPORT.md`,
+`IMPLEMENTATION_REPORT.md`.
 
 ## Layout
-- `research_lib/` - the research + execution stack (122 unit tests).
+- `research_lib/` - the research + execution stack (132 unit tests).
 - `research/artifacts/` - every raw result (CSV/JSON) produced by the pipeline.
 - `research/reports/` - the 18 mandated deliverable documents.
 - `research/data/` - research-window market data (gitignored, regenerable).
