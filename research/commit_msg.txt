@@ -1,8 +1,0 @@
-Research index, phase log, and final commit
-
-- research/README.md: index + reproduction commands
-- research/PHASE_LOG.md: per-phase report in the brief's format
-- Final verdict: RESEARCH ONLY (evidence in reports/)
-- 104 unit tests passing; 18 reports generated; acceptance gate mechanical
-
-Co-authored-by: CommandCodeBot <noreply@commandcode.ai>
