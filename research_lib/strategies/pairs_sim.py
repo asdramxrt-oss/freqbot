@@ -47,7 +47,16 @@ class PairsSimulator:
     def __init__(self, params: PairsSimParams | None = None):
         self.p = params or PairsSimParams()
 
-    def run(self, frame: DataFrame, target: np.ndarray) -> tuple[DataFrame, np.ndarray]:
+    def run(
+        self, frame: DataFrame, target: np.ndarray, entry_gate: np.ndarray | None = None
+    ) -> tuple[DataFrame, np.ndarray]:
+        """Backtest a pairs target stream over frame.
+
+        target[t]==+1 means hold long A/short B from open t (signal shift handled by the
+        generator). entry_gate: optional causal bool array (len == len(frame)); gate[t]
+        consulted at open[t]. When False, no new entry opens and an open position is closed
+        (router halt / regime switch).
+        """
         dates = frame["date"].to_numpy()
         open_a = frame["open_a"].to_numpy(dtype=float)
         close_a = frame["close_a"].to_numpy(dtype=float)
@@ -56,6 +65,9 @@ class PairsSimulator:
         n = len(frame)
         if len(target) != n:
             raise ValueError("target length mismatch")
+        if entry_gate is not None and len(entry_gate) != n:
+            raise ValueError("entry_gate length mismatch")
+        gate = np.ones(n, dtype=bool) if entry_gate is None else entry_gate
 
         notional_cfg = self.p.capital_fraction
         cost = self.p.cost
@@ -73,8 +85,12 @@ class PairsSimulator:
 
         for t in range(1, n):
             desired = int(target[t]) if t > 0 else 0
+            # router gate off at this open: force a close (regime switch / halt)
+            gate_halt = pos != 0 and not gate[t]
+            if gate_halt:
+                desired = 0
             # enter on rising edge from flat (no stop-out re-entry churn)
-            if pos == 0 and desired != 0:
+            if pos == 0 and desired != 0 and gate[t]:
                 if desired == 1:
                     pa = _fill_price(open_a[t], 1, cost)   # buy A
                     pb = _fill_price(open_b[t], -1, cost)  # sell B
@@ -127,7 +143,7 @@ class PairsSimulator:
                     "notional": entry_notional * 2,
                     "pnl_net": float(pnl),
                     "fees_paid": float(fees),
-                    "exit_reason": "signal",
+                    "exit_reason": "regime_halt" if gate_halt else "signal",
                     "bars_held": t - entry_bar,
                 }
                 pos = 0

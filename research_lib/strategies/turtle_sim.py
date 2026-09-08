@@ -71,13 +71,28 @@ class TurtleSimulator:
         return notional * (c.fee() + c.half_spread() + c.slippage())
 
     # ------------------------------------------------------------------
-    def run(self, df: DataFrame) -> tuple[DataFrame, np.ndarray, list[dict]]:
+    def run(
+        self,
+        df: DataFrame,
+        entry_gate: np.ndarray | None = None,
+    ) -> tuple[DataFrame, np.ndarray, list[dict]]:
+        """Backtest Turtle over df.
+
+        entry_gate: optional causal per-bar bool array (len == len(df)). gate[t] is
+        consulted when an entry would fill at open[t] (it must be computable from data
+        <= t-1, e.g. a router's regime gate). When gate[t] is False no NEW position opens
+        at open[t], and an open position is closed at open[t] (the router has switched
+        strategies / declared a no-trade regime).
+        """
         opens = df["open"].to_numpy(dtype=float)
         highs = df["high"].to_numpy(dtype=float)
         lows = df["low"].to_numpy(dtype=float)
         closes = df["close"].to_numpy(dtype=float)
         dates = df["date"].to_numpy()
         n = len(df)
+        if entry_gate is not None and len(entry_gate) != n:
+            raise ValueError("entry_gate length mismatch")
+        gate = np.ones(n, dtype=bool) if entry_gate is None else entry_gate
         n_arr = self._wilder_atr(df)
         dc_up_hi, dc_lo_hi = self._donchian(df, self.p.entry_n)
         # exit channel = same as entry channel for classic turtle system 1
@@ -159,7 +174,7 @@ class TurtleSimulator:
             n_prev = n_arr[prev] if np.isfinite(n_arr[prev]) else opens[t] * 0.01
 
             # ---- open a position (from previous close signal) at this open ----
-            if side == 0:
+            if side == 0 and gate[t]:
                 new_side = 0
                 if long_fresh:
                     new_side = 1
@@ -182,6 +197,10 @@ class TurtleSimulator:
                         log.append({"date": dates[t], "action": "entry", "side": side, "units": 1, "price": px, "N": n_prev, "qty": qty})
             # ---- manage open position ----
             if side != 0:
+                # router gate turned off at this open: force-close (strategy switch / halt)
+                if not gate[t]:
+                    close_all(t, opens[t], "regime_halt")
+                    continue
                 # pyramiding add: 0.5N beyond last entry, once per level
                 last = units[-1].entry_price
                 open_notional = float(sum(u.qty * u.entry_price for u in units))

@@ -103,6 +103,8 @@ class RiskState:
     market_data_fresh: bool = True
     reconciliation_ok: bool = True
     account_consistent: bool = True
+    vol_spike_blocked: bool = False  # HALT gate set by the vol-spike forecaster
+    blocked_strategies: set[str] = field(default_factory=set)  # per-strategy halts
 
 
 class CentralRiskEngine:
@@ -144,7 +146,37 @@ class CentralRiskEngine:
         dd = (s.peak_equity - s.equity) / s.peak_equity if s.peak_equity > 0 else 0
         if dd >= self.limits.max_drawdown_kill:
             reasons.append(f"drawdown {dd:.1%} >= kill limit {self.limits.max_drawdown_kill:.1%}")
+        if s.vol_spike_blocked:
+            reasons.append("volatility spike predicted - HALT (risk engine kill gate)")
         return reasons
+
+    # ------------------------------------------------------------------
+    # Vol-spike kill-switch integration (unified_strategy_plan.md Phase 3)
+    # ------------------------------------------------------------------
+    def set_vol_spike_gate(self, p_spike: float | None, threshold: float = 0.80) -> bool:
+        """Update the HALT gate from the XGBoost vol-spike forecaster.
+
+        When p_spike exceeds ``threshold`` the engine enters a hard NO-TRADE state for ALL
+        strategies (a forecast expansion means the regime is shifting and both Turtle and
+        Pairs can be run over). Returns True when the gate is active.
+        """
+        blocked = p_spike is not None and np.isfinite(p_spike) and p_spike > threshold
+        self.state.vol_spike_blocked = bool(blocked)
+        return blocked
+
+    def set_strategy_block(self, strategy_id: str, blocked: bool) -> None:
+        """Per-strategy halt (e.g. the router disables Pairs in a trend regime)."""
+        if blocked:
+            self.state.blocked_strategies.add(strategy_id)
+        else:
+            self.state.blocked_strategies.discard(strategy_id)
+
+    def strategy_blocked(self, strategy_id: str) -> bool:
+        """True when a strategy may not open new positions (kill gates + per-strategy)."""
+        return self.state.vol_spike_blocked or strategy_id in self.state.blocked_strategies
+
+    def clear_vol_spike_gate(self) -> None:
+        self.state.vol_spike_blocked = False
 
     # ------------------------------------------------------------------
     def evaluate(
@@ -159,6 +191,9 @@ class CentralRiskEngine:
 
         # 1. global kill switches
         reasons.extend(self._check_kill_switches())
+        # 1b. per-strategy block (router): strategy may not open new positions
+        if self.strategy_blocked(intent.strategy_id):
+            reasons.append(f"strategy {intent.strategy_id} blocked by router/vol-spike gate")
         # 2. basic sanity
         if intent.units <= 0 or intent.notional <= 0 or intent.entry_ref_price <= 0:
             reasons.append("invalid intent (units/notional/price <= 0)")
