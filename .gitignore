@@ -129,5 +129,6 @@ research/data_holdout/
 research/experiments/
 research/reports/
 research/backtest_results/
+research/artifacts/
 user_data/backtest_results/
 user_data/logs/

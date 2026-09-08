@@ -33,7 +33,28 @@ class EngineConfig:
     equity: float = 100_000.0
     cost: CostModel = field(default_factory=CostModel)
     risk_per_trade: float = 0.01
+    max_leverage: float = 1.0  # spot default; caps notional at equity * max_leverage
     allow_short: bool = True
+
+
+def risk_sized_units(
+    equity: float,
+    risk_frac: float,
+    entry: float,
+    stop_dist: float,
+    max_leverage: float,
+) -> float:
+    """Units sized to risk ``risk_frac`` of equity, capped by the leverage/notional limit.
+
+    units_risk = (equity * risk_frac) / stop_dist
+    units_cap  = (equity * max_leverage) / entry   (notional <= leverage * equity)
+    Returns min(units_risk, units_cap) so 1x accounts never hold notional above equity.
+    """
+    if stop_dist <= 0 or entry <= 0 or equity <= 0:
+        return 0.0
+    units_risk = (equity * risk_frac) / stop_dist
+    units_cap = (equity * max_leverage) / entry
+    return max(min(units_risk, units_cap), 0.0)
 
 
 @dataclass
@@ -175,7 +196,7 @@ class EventBacktester:
                 entry = self._fill(opens[t], desired)
                 sd = abs(entry - stop[t]) if not np.isnan(stop[t]) else entry * 0.02
                 sd = max(sd, entry * 1e-4)
-                units = (equity * self.cfg.risk_per_trade) / sd
+                units = risk_sized_units(equity, self.cfg.risk_per_trade, entry, sd, self.cfg.max_leverage)
                 if units > 0:
                     fee_e = self._fees(units * entry)
                     equity -= fee_e
@@ -195,7 +216,7 @@ class EventBacktester:
                 entry = self._fill(opens[t], desired)
                 sd = abs(entry - stop[t]) if not np.isnan(stop[t]) else entry * 0.02
                 sd = max(sd, entry * 1e-4)
-                units = (equity * self.cfg.risk_per_trade) / sd
+                units = risk_sized_units(equity, self.cfg.risk_per_trade, entry, sd, self.cfg.max_leverage)
                 if units > 0:
                     fee_e = self._fees(units * entry)
                     equity -= fee_e

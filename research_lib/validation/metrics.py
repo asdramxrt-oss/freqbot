@@ -24,14 +24,23 @@ def _annualization(timeframe: str) -> float:
 
 
 def equity_curve_from_trades(trades: DataFrame, start_equity: float, timeframe: str) -> Series:
-    """Build a daily-resampled equity curve from a trade log (pnl_net per trade)."""
+    """Build a DAILY-calendar equity curve from a trade log (pnl_net per trade).
+
+    Trades are marked to their exit date; days without exits carry the previous equity
+    forward (0 PnL) so returns are measured on a fixed, regular grid. This is the only
+    defensible way to compute Sharpe/Sortino on sparse trade streams - computing returns
+    over gaps between trade days massively inflates annualized ratios.
+    """
     if trades is None or len(trades) == 0:
         idx = pd.date_range("2022-01-01", periods=2, freq="D", tz="UTC")
         return Series(np.nan, index=idx)
     df = trades.copy()
     df["exit_time"] = pd.to_datetime(df["exit_time"], utc=True)
     df = df.sort_values("exit_time")
-    daily = df.groupby(df["exit_time"].dt.date)["pnl_net"].sum()
+    daily = df.groupby(df["exit_time"].dt.normalize())["pnl_net"].sum()
+    # fixed daily calendar spanning first exit .. last exit
+    full_idx = pd.date_range(daily.index.min(), daily.index.max(), freq="D", tz="UTC")
+    daily = daily.reindex(full_idx, fill_value=0.0)
     eq = start_equity + daily.cumsum()
     eq.index = pd.to_datetime(eq.index, utc=True)
     return eq
@@ -65,16 +74,30 @@ def trade_metrics(trades: DataFrame) -> dict:
 
 
 def series_metrics(eq: Series, timeframe: str = "1h", periods_per_year: int | None = None) -> dict:
-    """Risk/return metrics from an equity curve (nan when insufficient data)."""
-    if eq is None or len(eq.dropna()) < 5:
+    """Risk/return metrics from an equity curve (nan when insufficient data).
+
+    ``eq`` is expected on a REGULAR calendar (see equity_curve_from_trades). When
+    ``periods_per_year`` is not given it is inferred from the median spacing of the series
+    index; a daily equity curve therefore annualizes by 365 regardless of the bar
+    timeframe of the strategy that produced it.
+    """
+    if eq is None or len(eq.dropna()) < 10:
         return {"sharpe": np.nan, "sortino": np.nan, "max_dd": np.nan, "cagr": np.nan,
                 "calmar": np.nan, "total_return": np.nan}
     eq = eq.dropna()
     rets = eq.pct_change().dropna()
-    if len(rets) < 5:
+    if len(rets) < 10:
         return {"sharpe": np.nan, "sortino": np.nan, "max_dd": np.nan, "cagr": np.nan,
                 "calmar": np.nan, "total_return": np.nan}
-    ppy = periods_per_year or _annualization(timeframe)
+    if periods_per_year is not None:
+        ppy = periods_per_year
+    else:
+        # infer from the index spacing (daily => 365)
+        try:
+            spacing = eq.index.to_series().diff().dt.total_seconds().median()
+            ppy = 365.25 * 86400 / spacing if spacing and spacing > 0 else 365
+        except Exception:  # noqa: BLE001
+            ppy = 365
     mu = rets.mean()
     sd = rets.std(ddof=1)
     sharpe = float(mu / sd * np.sqrt(ppy)) if sd and sd > 0 else np.nan
@@ -86,7 +109,7 @@ def series_metrics(eq: Series, timeframe: str = "1h", periods_per_year: int | No
     max_dd = float(dd.min())
     n_years = len(eq) / ppy
     cagr = float((eq.iloc[-1] / eq.iloc[0]) ** (1 / n_years) - 1) if n_years > 0 and eq.iloc[0] > 0 else np.nan
-    calmar = float(cagr / abs(max_dd)) if max_dd < 0 else np.nan
+    calmar = float(cagr / abs(max_dd)) if max_dd < 0 and np.isfinite(cagr) else np.nan
     total_return = float(eq.iloc[-1] / eq.iloc[0] - 1) if eq.iloc[0] > 0 else np.nan
     return {
         "sharpe": sharpe,
@@ -96,6 +119,7 @@ def series_metrics(eq: Series, timeframe: str = "1h", periods_per_year: int | No
         "calmar": calmar,
         "total_return": total_return,
         "n_periods": int(len(eq)),
+        "annualization": ppy,
     }
 
 

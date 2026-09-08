@@ -34,6 +34,8 @@ class TurtleSimParams:
     risk_per_unit: float = 0.01
     pyramid_step_n: float = 0.5
     max_units: int = 4
+    max_leverage: float = 1.0  # spot default - caps per-unit notional contribution
+    allow_short: bool = False  # spot data cannot short without a margin account
     equity: float = 100_000.0
     cost: CostModel = field(default_factory=CostModel)
 
@@ -121,6 +123,7 @@ class TurtleSimulator:
                     "units": len(units),
                     "avg_entry": avg_entry,
                     "exit_price": float(price),
+                    "notional": float(avg_entry * total_qty),
                     "pnl_net": float(pnl),
                     "fees_paid": float(fees),
                     "mfe": float(mfe),
@@ -160,40 +163,52 @@ class TurtleSimulator:
                 new_side = 0
                 if long_fresh:
                     new_side = 1
-                elif short_fresh:
+                elif short_fresh and self.p.allow_short:
                     new_side = -1
                 if new_side != 0:
                     px = self._fill(opens[t], new_side)
                     if px > 0 and n_prev > 0:
-                        qty = (self.p.risk_per_unit * equity) / n_prev
+                        qty_risk = (self.p.risk_per_unit * equity) / n_prev
+                        # leverage cap: notional of this unit cannot push aggregate notional
+                        # above current equity * max_leverage
+                        qty_cap = (equity * self.p.max_leverage) / px
+                        qty = min(qty_risk, qty_cap)
                         fees = self._fees(qty * px)
                         equity -= fees
                         units = [_Unit(entry_time=dates[t], entry_price=px, qty=qty)]
                         side = new_side
                         stop = px - side * self.p.stop_mult * n_prev
                         pos_entry_bar = t
-                        log.append({"date": dates[t], "action": "entry", "side": side, "units": 1, "price": px, "N": n_prev})
+                        log.append({"date": dates[t], "action": "entry", "side": side, "units": 1, "price": px, "N": n_prev, "qty": qty})
             # ---- manage open position ----
             if side != 0:
                 # pyramiding add: 0.5N beyond last entry, once per level
                 last = units[-1].entry_price
+                open_notional = float(sum(u.qty * u.entry_price for u in units))
+                remaining_cap = (equity * self.p.max_leverage - open_notional) / max(opens[t], 1e-9)
                 if len(units) < self.p.max_units:
                     if side == 1 and opens[t] >= last + self.p.pyramid_step_n * n_prev:
                         px = self._fill(opens[t], 1)
-                        qty = (self.p.risk_per_unit * equity) / n_prev
-                        fees = self._fees(qty * px)
-                        equity -= fees
-                        units.append(_Unit(entry_time=dates[t], entry_price=px, qty=qty))
-                        stop = px - self.p.stop_mult * n_prev
-                        log.append({"date": dates[t], "action": "add", "side": side, "units": len(units), "price": px, "N": n_prev})
+                        qty_risk = (self.p.risk_per_unit * equity) / n_prev
+                        # only add when a FULL risk-sized unit fits inside the leverage
+                        # budget (a dust add that moves the stop is an execution artifact)
+                        if remaining_cap >= qty_risk:
+                            qty = qty_risk
+                            fees = self._fees(qty * px)
+                            equity -= fees
+                            units.append(_Unit(entry_time=dates[t], entry_price=px, qty=qty))
+                            stop = px - self.p.stop_mult * n_prev
+                            log.append({"date": dates[t], "action": "add", "side": side, "units": len(units), "price": px, "N": n_prev, "qty": qty})
                     elif side == -1 and opens[t] <= last - self.p.pyramid_step_n * n_prev:
                         px = self._fill(opens[t], -1)
-                        qty = (self.p.risk_per_unit * equity) / n_prev
-                        fees = self._fees(qty * px)
-                        equity -= fees
-                        units.append(_Unit(entry_time=dates[t], entry_price=px, qty=qty))
-                        stop = px + self.p.stop_mult * n_prev
-                        log.append({"date": dates[t], "action": "add", "side": side, "units": len(units), "price": px, "N": n_prev})
+                        qty_risk = (self.p.risk_per_unit * equity) / n_prev
+                        if remaining_cap >= qty_risk:
+                            qty = qty_risk
+                            fees = self._fees(qty * px)
+                            equity -= fees
+                            units.append(_Unit(entry_time=dates[t], entry_price=px, qty=qty))
+                            stop = px + self.p.stop_mult * n_prev
+                            log.append({"date": dates[t], "action": "add", "side": side, "units": len(units), "price": px, "N": n_prev, "qty": qty})
                 # stop check intra-bar
                 exit_price = np.nan
                 reason = ""
