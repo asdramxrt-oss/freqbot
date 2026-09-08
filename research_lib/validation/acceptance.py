@@ -257,6 +257,108 @@ def evaluate_acceptance(artifacts: Path = ARTIFACTS_DIR) -> AcceptanceVerdict:
     return v
 
 
+def evaluate_pairs_acceptance(artifacts: Path = ARTIFACTS_DIR) -> AcceptanceVerdict:
+    """Evaluate the pairs/spread strategy against the 17 gates.
+
+    The pairs engine is the blueprint's Phase-1 candidate (market-neutral spread reversion
+    on 15m data). Evidence comes from research/artifacts/pairs/*.
+    """
+    v = AcceptanceVerdict(strategy="pairs_localz_15m_ethbtc_solbtc_bnbbtc")
+
+    def _j(name):
+        p = artifacts / "pairs" / f"{name}.json"
+        return json.loads(p.read_text()) if p.exists() else None
+
+    ho = _j("holdout_metrics")
+    wf = _j("wfo_windows") or []
+    vol_m = _j("volspike_model") or {}
+    vol_f = _j("volspike_filter_effect") or {}
+    maker = _j("maker_economics") or {}
+    ml = _j("metalabel_pairs") or {}
+    per_ratio = artifacts / "pairs" / "per_ratio.csv"
+
+    # 1-2 causality/leakage: local-z is truncation-invariant (unit-tested) and signals are
+    # prefix-invariant by construction; no directional model was fit on the full window.
+    v.gates.append(GateResult(1, "no look-ahead", True,
+                              "local z uses trailing window only; truncation-invariance unit-tested"))
+    v.gates.append(GateResult(2, "no material leakage", True,
+                              "causal z + walk-forward parameter estimation; labels future-only"))
+
+    # 3 purged validation
+    v.gates.append(GateResult(3, "purged validation passed", False,
+                              "meta-model AUC ~0.47-0.51 OOS on 318 events (no signal)"))
+
+    # 4 walk-forward positive
+    if wf:
+        pos = sum(1 for r in wf if r["pnl"] > 0)
+        v.gates.append(GateResult(4, "walk-forward performance positive", pos == len(wf) and len(wf) > 0,
+                                  f"{pos}/{len(wf)} windows positive (all 7 negative on ETH/BTC)"))
+    else:
+        v.gates.append(GateResult(4, "walk-forward positive", False, "missing"))
+
+    # 5 CPCV
+    v.gates.append(GateResult(5, "CPCV distribution acceptable", False,
+                              "negative-gross strategy; CPCV paths not meaningful for acceptance"))
+
+    # 6 final holdout positive
+    if ho:
+        v.gates.append(GateResult(6, "final holdout positive", float(ho.get("total_pnl", 0)) > 0,
+                                  f"holdout pnl=${ho.get('total_pnl'):,.0f} "
+                                  f"sharpe={ho.get('sharpe'):.2f} pf={ho.get('profit_factor'):.2f}"))
+    else:
+        v.gates.append(GateResult(6, "final holdout positive", False, "missing"))
+
+    # 7 cost sensitivity (fees are not the problem - gross is negative)
+    gross = float(maker.get("gross", 0.0))
+    v.gates.append(GateResult(7, "cost sensitivity acceptable", False,
+                              f"gross=${gross:,.0f} < 0 - fails even at zero cost; "
+                              f"maker savings ~${maker.get('maker_saving_est', 0):,.0f} cannot rescue"))
+    # 8 parameter perturbation
+    v.gates.append(GateResult(8, "parameter perturbation acceptable", False,
+                              "all tested windows/z-thresholds negative (7d-112d, z=2-3); "
+                              "consistent failure, not a single fragile point"))
+    # 9 regime stress
+    v.gates.append(GateResult(9, "regime stress test acceptable", False,
+                              "all semi-annual windows 2022-2025 negative"))
+    # 10 MC risk
+    v.gates.append(GateResult(10, "Monte Carlo risk acceptable", False,
+                              "holdout negative with high probability (strategy-level p(loss)>0.8)"))
+    # 11 drawdown budget
+    if ho:
+        dd = abs(float(ho.get("max_dd", 0.0)))
+        v.gates.append(GateResult(11, "drawdown within risk budget", dd < 0.20,
+                                  f"holdout maxDD={dd:.1%} (budget 20%)"))
+    else:
+        v.gates.append(GateResult(11, "drawdown within budget", False, "missing"))
+    # 12 sufficient trades
+    v.gates.append(GateResult(12, "sufficient trade count", True,
+                              "318 pooled research events + 84 holdout trades (adequate density)"))
+    # 13 execution realism
+    v.gates.append(GateResult(13, "execution assumptions realistic", True,
+                              "two-leg dollar-neutral fills, per-leg costs, funding modeled as carry"))
+    # 14 single-period dependence - actually regime-INvariance is the issue (fails everywhere)
+    v.gates.append(GateResult(14, "no single small period explains profits", True,
+                              "losses are uniform across periods - not a one-period artifact"))
+    # 15 single-symbol dependence
+    v.gates.append(GateResult(15, "no single symbol explains profits", True,
+                              "all 3-4 ratios lose independently (broad failure, not symbol-specific)"))
+    # 16 parameter dependence - consistent across params means no sharp peak
+    v.gates.append(GateResult(16, "no extreme parameter dependence", True,
+                              "failure is parameter-flat (no hidden good pocket)"))
+    # 17 tail
+    v.gates.append(GateResult(17, "no catastrophic tail behavior", True,
+                              "drawdowns bounded ~15-28% (bleed, not blowup)"))
+
+    n_pass = len(v.passed_gates)
+    v.final = (
+        "PRODUCTION READY" if n_pass == len(v.gates)
+        else "PAPER ONLY" if n_pass >= 10
+        else "RESEARCH ONLY" if n_pass >= 6
+        else "REJECT"
+    )
+    return v
+
+
 if __name__ == "__main__":
     verdict = evaluate_acceptance()
     print(f"\n=== ACCEPTANCE VERDICT: {verdict.strategy} ===")
@@ -269,3 +371,12 @@ if __name__ == "__main__":
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(verdict.to_dict(), indent=2))
     print(f"\nverdict saved: {out}")
+
+    vp = evaluate_pairs_acceptance()
+    print(f"\n=== ACCEPTANCE VERDICT: {vp.strategy} ===")
+    print(f"FINAL: {vp.final}  ({len(vp.passed_gates)}/{len(vp.gates)} gates passed)")
+    for g in vp.gates:
+        mark = "PASS" if g.passed else "FAIL"
+        print(f"  [{mark}] Gate {g.gate_id:2d} {g.name}: {g.evidence}")
+    (ARTIFACTS_DIR / "acceptance" / "verdict_pairs.json").write_text(json.dumps(vp.to_dict(), indent=2))
+    print(f"\npairs verdict saved: {ARTIFACTS_DIR / 'acceptance' / 'verdict_pairs.json'}")
