@@ -129,6 +129,38 @@ class TestPairsSimulator:
         trades, _ = sim.run(frame, target)
         assert len(trades) == 1
 
+    def test_generator_is_shifted_one_bar(self):
+        """CRITICAL causality: a z decision at close of bar i must be written to
+        target[i+1] so the simulator fills at open[i+1], never open[i].
+
+        Deterministic frame: a constant ratio (z undefined -> flat) that dips sharply at
+        exactly bar K. The dip decision at close K must produce an entry executed at K+1's
+        open - target[K] must be flat because close[K] is unknowable at open[K].
+        """
+        dates = pd.date_range("2022-01-01", periods=3000, freq="15min", tz="UTC")
+        K = 1000
+        px_a = np.full(3000, 100.0)
+        px_b = np.full(3000, 100.0)
+        # spread = log(A/B): 0 until K, then a persistent dip to -0.693 (A drops 50%)
+        px_a[K:] = 50.0
+        frame = pd.DataFrame(
+            {
+                "date": dates,
+                "open_a": px_a, "high_a": px_a, "low_a": px_a, "close_a": px_a,
+                "open_b": px_b, "high_b": px_b, "low_b": px_b, "close_b": px_b,
+                "spread": np.log(px_a / px_b),
+            }
+        )
+        p = PairsParams(est_window_bars=200, z_entry=2.0, z_exit=0.0, ou_gate=False)
+        res = generate_signals(frame, p)
+        entries = [e for e in res.events if e["action"] == "entry" and e["side"] == 1]
+        assert len(entries) == 1
+        exec_bar = dates.searchsorted(entries[0]["date"])
+        # the dip at close K is acted on at open K+1 - never at open K
+        assert exec_bar == K + 1
+        assert res.target[K] == 0
+        assert res.target[K + 1] == 1
+
 
 class TestPairsRealData:
     def test_real_ethbtc_spread_runs(self):

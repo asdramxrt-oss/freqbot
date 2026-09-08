@@ -119,9 +119,15 @@ def generate_signals(
 ) -> PairsSignalResult:
     """Generate causal pairs signals over the frame.
 
+    CONVENTION (matches EventBacktester / TurtleSim): a decision made at bar i uses only
+    information available at the CLOSE of bar i (z[i], which is built from data <= i) and
+    is written to target[i+1], so the earliest executable fill is the OPEN of bar i+1.
+    Filling target[t] at open[t] from z[t] would be a same-bar look-ahead - this engine
+    never does that.
+
     Entry when |z| crosses z_entry (spread cheap -> long spread). Exit when z crosses back
-    through z_exit or the max-hold time stop fires. Decisions at bar t use z[t] (computed
-    from data <= t) and are executed at t+1 open by the simulator.
+    through z_exit or the max-hold time stop fires. Events are logged at the bar whose open
+    executes them.
     """
     n = len(frame)
     z = causal_local_z(frame, params)
@@ -135,29 +141,27 @@ def generate_signals(
     entry_bar = -1
     events: list[dict] = []
     dates = frame["date"].to_numpy()
-    for t in range(1, n):
-        zt = z[t]
-        # decide position DURING bar t+1 using z[t] (executed at open t+1 by simulator)
-        if np.isnan(zt):
-            target[t] = pos  # hold previous decision state if no estimate yet
-            continue
-        tradable = ou_ok[t] if params.ou_gate else True
-        if pos == 0:
-            if tradable and zt <= -params.z_entry:
-                pos = 1
-                entry_bar = t
-                events.append({"date": dates[t], "action": "entry", "side": 1, "z": float(zt)})
-            elif tradable and zt >= params.z_entry:
-                pos = -1
-                entry_bar = t
-                events.append({"date": dates[t], "action": "entry", "side": -1, "z": float(zt)})
-        elif pos == 1:
-            if zt >= params.z_exit or (t - entry_bar) >= params.max_hold_bars:
-                pos = 0
-                events.append({"date": dates[t], "action": "exit", "side": 1, "z": float(zt)})
-        elif pos == -1:
-            if zt <= params.z_exit or (t - entry_bar) >= params.max_hold_bars:
-                pos = 0
-                events.append({"date": dates[t], "action": "exit", "side": -1, "z": float(zt)})
-        target[t] = pos
+    for i in range(1, n - 1):  # decision index i; executed at bar i+1 open
+        j = i + 1  # bar whose open executes the decision made at close of i
+        zi = z[i]
+        if not np.isnan(zi):
+            tradable = ou_ok[i] if params.ou_gate else True
+            if pos == 0:
+                if tradable and zi <= -params.z_entry:
+                    pos = 1
+                    entry_bar = j
+                    events.append({"date": dates[j], "action": "entry", "side": 1, "z": float(zi)})
+                elif tradable and zi >= params.z_entry:
+                    pos = -1
+                    entry_bar = j
+                    events.append({"date": dates[j], "action": "entry", "side": -1, "z": float(zi)})
+            elif pos == 1:
+                if zi >= params.z_exit or (j - entry_bar) >= params.max_hold_bars:
+                    pos = 0
+                    events.append({"date": dates[j], "action": "exit", "side": 1, "z": float(zi)})
+            elif pos == -1:
+                if zi <= params.z_exit or (j - entry_bar) >= params.max_hold_bars:
+                    pos = 0
+                    events.append({"date": dates[j], "action": "exit", "side": -1, "z": float(zi)})
+        target[j] = pos
     return PairsSignalResult(z=z, target=target, ou_valid=ou_ok, events=events)
