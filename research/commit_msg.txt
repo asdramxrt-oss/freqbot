@@ -1,9 +1,0 @@
-Add detailed implementation & failure report
-
-research/IMPLEMENTATION_REPORT.md documents: what was implemented (all phases),
-31 bugs/methodology traps found and fixed (with the two most consequential: a Sharpe
-inflation bug from irregular equity resampling ~6x, and Turtle sizing that implied >1x
-notional on a spot account), and the honest negative research results (OU rejected,
-meta-model AUC<0.5, regime router not adopted, Turtle failing the final holdout).
-
-Co-authored-by: CommandCodeBot <noreply@commandcode.ai>
