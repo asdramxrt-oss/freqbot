@@ -67,6 +67,7 @@ class OrderIntent:
     notional: float
     model_p: float | None = None
     bet_fraction: float = 1.0  # 0..1 applied by bet sizer
+    post_only: bool = False    # True -> rest a maker (post-only) limit order
     idempotency_key: str = ""
 
 
@@ -98,6 +99,8 @@ class RiskState:
     open_notional: dict[str, float] = field(default_factory=dict)  # symbol -> notional
     open_side: dict[str, int] = field(default_factory=dict)
     strategy_risk_used: dict[str, float] = field(default_factory=dict)
+    symbol_strategy_risk: dict[str, float] = field(default_factory=dict)
+    symbol_strategy_id: dict[str, str] = field(default_factory=dict)
     kill_switch: bool = False
     broker_connected: bool = True
     market_data_fresh: bool = True
@@ -202,17 +205,21 @@ class CentralRiskEngine:
         # 3. regime blocklist
         blocked = self.limits.regime_blocklist.get(intent.strategy_id, [])
         # regime is attached by caller via intent metadata-free path: strategy id used as key
+        # reduce-only: an intent trading AGAINST the registered open side cuts exposure
+        # rather than adding it - exposure/leverage/margin limits must not block it
+        # (kill switches and sanity checks above still apply).
+        reducing = self.state.open_side.get(intent.symbol) == -intent.side
         # 4. leverage
         lev = intent.notional / self.state.equity if self.state.equity > 0 else 0
-        if lev > self.limits.max_leverage:
+        if not reducing and lev > self.limits.max_leverage:
             reasons.append(f"leverage {lev:.2f} > limit {self.limits.max_leverage:.2f}")
         # 5. per-symbol notional
         sym_after = self.state.open_notional.get(intent.symbol, 0.0) + intent.notional
-        if sym_after / self.state.equity > self.limits.per_symbol_notional:
+        if not reducing and sym_after / self.state.equity > self.limits.per_symbol_notional:
             reasons.append("per-symbol notional limit exceeded")
         # 6. portfolio exposure
         total = sum(self.state.open_notional.values()) + intent.notional
-        if total / self.state.equity > self.limits.portfolio_notional:
+        if not reducing and total / self.state.equity > self.limits.portfolio_notional:
             reasons.append("portfolio exposure limit exceeded")
         # 7. per-trade risk: |entry - stop| * units <= equity * per_trade_risk
         if intent.stop_price is not None:
@@ -231,11 +238,11 @@ class CentralRiskEngine:
         # 9. strategy concentration (notional share of one strategy)
         strat_notional = self.state.strategy_risk_used.get(intent.strategy_id, 0.0)
         strat_after = strat_notional + intent.notional * intent.bet_fraction
-        if strat_after / max(self.state.equity, 1e-9) > self.limits.max_strategy_fraction:
+        if not reducing and strat_after / max(self.state.equity, 1e-9) > self.limits.max_strategy_fraction:
             reasons.append("strategy concentration limit exceeded")
         # 10. margin availability (simple proxy: free equity after reserve)
         reserve = self.state.equity * 0.05
-        if intent.notional * intent.bet_fraction > (self.state.equity - total - reserve):
+        if not reducing and intent.notional * intent.bet_fraction > (self.state.equity - total - reserve):
             reasons.append("insufficient margin/available equity")
 
         approved = len(reasons) == 0
@@ -252,6 +259,15 @@ class CentralRiskEngine:
             self.state.strategy_risk_used.get(intent.strategy_id, 0.0)
             + intent.notional * intent.bet_fraction
         )
+        # remember this position's strategy contribution so on_position_closed can
+        # release it - the concentration check must track CURRENT open share, not a
+        # lifetime gross accumulator (a long-running multi-trade strategy would else
+        # be permanently blocked after enough turnover)
+        self.state.symbol_strategy_risk[intent.symbol] = (
+            self.state.symbol_strategy_risk.get(intent.symbol, 0.0)
+            + intent.notional * intent.bet_fraction
+        )
+        self.state.symbol_strategy_id[intent.symbol] = intent.strategy_id
 
     def on_position_closed(self, symbol: str, realized_pnl: float, now: datetime | None = None) -> None:
         """Record a closed position: update equity and daily/weekly pnl counters."""
@@ -263,6 +279,28 @@ class CentralRiskEngine:
         self.state.week_realized_pnl += realized_pnl
         self.state.open_notional.pop(symbol, None)
         self.state.open_side.pop(symbol, None)
+        contribution = self.state.symbol_strategy_risk.pop(symbol, 0.0)
+        strat = self.state.symbol_strategy_id.pop(symbol, None)
+        if strat is not None and contribution:
+            remaining = self.state.strategy_risk_used.get(strat, 0.0) - contribution
+            if remaining > 1e-9:
+                self.state.strategy_risk_used[strat] = remaining
+            else:
+                self.state.strategy_risk_used.pop(strat, None)
+
+    def on_funding_payment(self, symbol: str, amount: float, now: datetime | None = None) -> None:
+        """Realised funding cashflow on a perpetual position (positive = received).
+
+        Funding is realised income at each settlement print, so it moves equity and the
+        daily/weekly counters exactly like a closed-trade pnl, without touching the open
+        position registers.
+        """
+        now = now or datetime.now(UTC)
+        self._roll_day(now)
+        self.state.equity += amount
+        self.state.peak_equity = max(self.state.peak_equity, self.state.equity)
+        self.state.day_realized_pnl += amount
+        self.state.week_realized_pnl += amount
 
     # ------------------------------------------------------------------
     def set_kill_switch(self, active: bool, reason: str = "") -> None:

@@ -142,7 +142,8 @@ class ExecutionEngine:
                 message=f"broker submit failed: {e}",
             )
         record.broker_order_id = str((ack or {}).get("order_id", record.order_id))
-        # Never assume filled on submit success
+        # Never assume filled on submit success - but an explicit fill confirmation in
+        # the ack (e.g. the paper broker's immediate fill) IS such a confirmation.
         status = (ack or {}).get("status", "")
         if status == "rejected":
             record.transition(OrderState.REJECTED, reason="broker rejected")
@@ -150,7 +151,9 @@ class ExecutionEngine:
         if status == "error":
             record.transition(OrderState.ERROR, reason="broker error")
             return ExecutionResult(order=record, decision=decision, broker_ack=ack, submitted=False, message="broker error")
-        if status in ("open", "partially_filled"):
+        if status == "filled":
+            record.transition(OrderState.FILLED, reason="broker confirmed fill in ack")
+        elif status in ("open", "partially_filled"):
             record.transition(OrderState.PARTIALLY_FILLED, reason="ack open")
         return ExecutionResult(order=record, decision=decision, broker_ack=ack, submitted=True, message="order submitted")
 

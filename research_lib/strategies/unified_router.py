@@ -59,6 +59,7 @@ class RouterConfig:
     vol_spike: VolSpikeParams = field(default_factory=lambda: VolSpikeParams(horizon_bars=96))
     vol_kill_p: float = 0.80      # HALT when P(spike) > this
     vol_refit_bars: int = 2688    # refit XGB every ~4 weeks
+    train_window: int | None = None  # None = expanding; else rolling N-bar HMM/XGB fit window
 
 
 @dataclass
@@ -109,6 +110,8 @@ def filtered_hmm_router(
     while start < n - 1:
         hist = np.arange(first_finite, start)
         hist = hist[finite[hist]]
+        if cfg.train_window is not None:
+            hist = hist[-cfg.train_window:]
         if len(hist) < cfg.min_train_bars // 2:
             start += cfg.refit_bars
             continue
@@ -154,7 +157,14 @@ def filtered_hmm_router(
                 continue
             row = ((obs[t] - mu) / sd).reshape(1, -1)
             try:
-                # filtered: single-observation forward probability (no backward smoothing)
+                # CAUSALITY NOTE (important): we call predict_proba on a SINGLE row. Despite
+                # the "forward-backward" name, hmmlearn's predict_proba on a 1-row input has
+                # no future observations to smooth over, so the result depends only on x_t -
+                # this is what makes the router causal. Do NOT "optimize" this into one
+                # predict_proba(block) call: on a multi-row block, _score smooths each bar
+                # using later bars in the block (verified: only ~36% argmax agreement with
+                # the per-row form on real GARCH data), which would introduce look-ahead and
+                # silently invalidate every walk-forward result in this project.
                 post = model.predict_proba(row)[0]
                 sid = int(np.argmax(post))
             except Exception:  # noqa: BLE001

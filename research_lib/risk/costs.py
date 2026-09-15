@@ -24,6 +24,7 @@ import pandas as pd
 from pandas import DataFrame
 
 Side = Literal["long", "short"]
+Role = Literal["maker", "taker"]
 
 
 @dataclass
@@ -41,24 +42,45 @@ class CostModel:
     def slippage(self) -> float:
         return self.slippage_bps / 1e4
 
-    def fee(self) -> float:
-        """Research backtests fill on next-bar open; taker fee is the conservative choice."""
-        return self.taker_fee
+    def fee(self, role: Role = "taker") -> float:
+        """Fee rate for one fill. Research backtests fill on next-bar open; the taker fee
+        is the conservative default. Post-only (maker) fills pay ``maker_fee``."""
+        return self.maker_fee if role == "maker" else self.taker_fee
 
-    def one_way_cost(self) -> float:
-        """Total fractional cost of one fill (fee + half spread + slippage)."""
+    def one_way_cost(self, role: Role = "taker") -> float:
+        """Total fractional cost of one fill. A maker fill earns the half-spread (posted
+        quote) and has no slippage, so its cost is just the maker fee minus nothing:
+        the price improvement is modelled in ``execution_price``/``maker_quote``."""
+        if role == "maker":
+            return self.maker_fee
         return self.fee() + self.half_spread() + self.slippage()
 
-    def round_trip_cost(self) -> float:
+    def round_trip_cost(self, role: Role = "taker") -> float:
         """Fractional cost of a full round trip (entry + exit)."""
-        return 2.0 * self.one_way_cost()
+        return 2.0 * self.one_way_cost(role)
 
-    def execution_price(self, ref_price: float, side: Side) -> float:
-        """Adverse execution price for a fill at ``ref_price`` (next-bar-open style).
+    def maker_quote(self, ref_price: float, side: Side) -> float:
+        """Limit price a post-only order would rest at: join the bid (buy) / ask (sell).
 
-        Buying (long entry / short exit) pays up: ref * (1 + half_spread + slippage).
-        Selling (short entry / long exit) receives less: ref * (1 - half_spread - slippage).
+        Buying posts below the reference mid; selling posts above it. If the market later
+        trades through this price the order fills at the quote (price improvement vs the
+        taker path, which pays the half-spread and slippage).
         """
+        offset = self.half_spread()
+        if side == "long":
+            return ref_price * (1.0 - offset)
+        return ref_price * (1.0 + offset)
+
+    def execution_price(self, ref_price: float, side: Side, role: Role = "taker") -> float:
+        """Execution price for a fill at ``ref_price`` (next-bar-open style).
+
+        Taker (default): adverse - buying pays up: ref * (1 + half_spread + slippage);
+        selling receives less: ref * (1 - half_spread - slippage).
+        Maker: the resting ``maker_quote`` - favourable by construction, with fill risk
+        handled by the broker (the bar must trade through the quote).
+        """
+        if role == "maker":
+            return self.maker_quote(ref_price, side)
         adverse = 1.0 + self.half_spread() + self.slippage()
         if side == "long":
             return ref_price * adverse
